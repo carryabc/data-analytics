@@ -536,14 +536,16 @@ def main():
         - **缺失值**: {stats['missing_cells']:,} 个单元格
         - **重复行**: {stats['duplicate_rows']:,} 行
         """
-        if not numeric_stats.empty and 'mean' in numeric_stats.columns:
-            mean_col = numeric_stats['mean'].idxmax()
-            std_col = numeric_stats['std'].idxmax() if 'std' in numeric_stats.columns else mean_col
-            report += f"""
-        ### 数值特征统计
-        - **均值最高的列**: {mean_col} ({numeric_stats.loc[mean_col, 'mean']:.2f})
-        - **标准差最大的列**: {std_col} ({numeric_stats.loc[std_col, 'std']:.2f})
-        """
+        if not numeric_stats.empty:
+            try:
+                mean_col = numeric_stats['mean'].idxmax() if 'mean' in numeric_stats.columns else None
+                std_col = numeric_stats['std'].idxmax() if 'std' in numeric_stats.columns else None
+                if mean_col and mean_col in numeric_stats.index:
+                    report += f"\n        ### 数值特征统计\n        - **均值最高的列**: {mean_col} ({numeric_stats.loc[mean_col, 'mean']:.2f})\n"
+                if std_col and std_col in numeric_stats.index:
+                    report += f"- **标准差最大的列**: {std_col} ({numeric_stats.loc[std_col, 'std']:.2f})\n"
+            except Exception:
+                pass
         
         st.markdown(report)
     
