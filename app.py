@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import io
 import warnings
+import re
 warnings.filterwarnings('ignore')
 
 # Page config
@@ -117,6 +118,347 @@ def get_category_freq(df: pd.DataFrame, col: str, top: int = 20) -> dict:
     return df[col].value_counts().head(top).to_dict()
 
 
+# ============ 本地规则解析器（无需API） ============
+
+def local_query_parser(df: pd.DataFrame, user_query: str) -> tuple:
+    """
+    本地规则解析器，无需API（智能增强版）
+    返回: (结果, 操作描述, 错误信息)
+    """
+    if df is None or df.empty:
+        return None, None, "数据为空，请先上传数据"
+    
+    query = user_query.strip().lower()
+    
+    # 获取可用列
+    all_cols = df.columns.tolist()
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    text_cols = df.select_dtypes(include=['object']).columns.tolist()
+    
+    def find_column(keywords, prefer_numeric=False):
+        """根据关键词智能匹配列名"""
+        if not keywords:
+            return None
+        cols = numeric_cols if prefer_numeric else all_cols
+        # 先精确匹配
+        for col in cols:
+            col_lower = col.lower()
+            for kw in keywords:
+                if kw == col_lower:
+                    return col
+        # 再模糊匹配
+        for col in cols:
+            col_lower = col.lower()
+            for kw in keywords:
+                if kw in col_lower:
+                    return col
+        return None
+    
+    # ===== 智能列名提取 =====
+    # 从查询中提取可能的列名关键词
+    query_keywords = []
+    # 常见关键词映射
+    keyword_map = {
+        '金额': ['金额', '钱', '消费', '订单金额', '总金额', '销售额', '收入', '价格'],
+        '年龄': ['年龄', '岁'],
+        '工资': ['工资', '薪资', '薪水'],
+        '数量': ['数量', '销量', '销售量'],
+        '成绩': ['成绩', '分数'],
+        '姓名': ['姓名', '名字', '名称'],
+        '部门': ['部门', '科室'],
+        '城市': ['城市', '地区'],
+        '产品': ['产品', '商品'],
+        '类别': ['类别', '分类', '类型'],
+        '会员': ['会员', '客户', '用户', 'id'],
+        '状态': ['状态'],
+    }
+    
+    # 检测查询中的关键词
+    detected_col_keywords = []
+    for col_type, keywords in keyword_map.items():
+        for kw in keywords:
+            if kw in query:
+                detected_col_keywords.append(col_type)
+                break
+    
+
+# ============ 自然语言查询（API版本） ============
+    top_match = re.search(r'前(\d+)条', query)
+    if top_match:
+        n = int(top_match.group(1))
+        return df.head(n), f"显示前{n}条", None
+    
+    tail_match = re.search(r'后(\d+)条', query)
+    if tail_match:
+        n = int(tail_match.group(1))
+        return df.tail(n), f"显示后{n}条", None
+    
+    # ===== 3. 处理"显示所有"或"全部" =====
+    if '所有' in query or '全部' in query:
+        return df, "显示全部数据", None
+    
+    # ===== 4. 处理简单数值筛选 =====
+    operators = [
+        (r'大于(\d+\.?\d*)', '>'),
+        (r'小于(\d+\.?\d*)', '<'),
+        (r'>=(\d+\.?\d*)', '>='),
+        (r'<=(\d+\.?\d*)', '<='),
+    ]
+    
+    for kw in ['金额', '年龄', '工资', '价格', '销量', '成绩', '分数']:
+        col = find_column([kw], prefer_numeric=True)
+        if col:
+            for pattern, op in operators:
+                match = re.search(pattern, query)
+                if match:
+                    value = float(match.group(1))
+                    try:
+                        if op == '>':
+                            result = df[df[col] > value]
+                        elif op == '<':
+                            result = df[df[col] < value]
+                        elif op == '>=':
+                            result = df[df[col] >= value]
+                        else:
+                            result = df[df[col] <= value]
+                        return result, f"筛选 {col}{op}{value}", None
+                    except Exception as e:
+                        return None, None, f"筛选失败: {str(e)}"
+    
+    # ===== 5. 处理平均值/总和/计数 =====
+    agg_func = None
+    if '平均' in query or '均值' in query:
+        agg_func = 'mean'
+    elif any(kw in query for kw in ['总和', '总计', '总额', '总金额']):
+        agg_func = 'sum'
+    elif any(kw in query for kw in ['数量', '总数', 'count']):
+        agg_func = 'count'
+    
+    if agg_func:
+        target_col = None
+        for kw in ['金额', '工资', '价格', '销量', '销售', '收入', '年龄', '成绩']:
+            target_col = find_column([kw], prefer_numeric=True)
+            if target_col:
+                break
+        
+        if not target_col and numeric_cols:
+            target_col = numeric_cols[0]
+        
+        if target_col:
+            try:
+                if agg_func == 'mean':
+                    result = df[target_col].mean()
+                elif agg_func == 'sum':
+                    result = df[target_col].sum()
+                else:
+                    result = len(df)
+            except Exception as e:
+                return None, None, f"计算失败: {str(e)}"
+            return result, f"{target_col}的{agg_func}", None
+        
+        if numeric_cols:
+            try:
+                if agg_func == 'mean':
+                    result = df[numeric_cols].mean().mean()
+                elif agg_func == 'sum':
+                    result = df[numeric_cols].sum().sum()
+                else:
+                    result = len(df)
+            except Exception as e:
+                return None, None, f"计算失败: {str(e)}"
+            return result, f"数值列的{agg_func}", None
+    
+    # ===== 6. 处理最大值/最小值 =====
+    if any(kw in query for kw in ['最大', '最高', '最多']):
+        target_col = None
+        for kw in ['金额', '工资', '价格', '销量', '销售', '年龄', '成绩']:
+            target_col = find_column([kw], prefer_numeric=True)
+            if target_col:
+                break
+        if not target_col and numeric_cols:
+            target_col = numeric_cols[0]
+        if target_col:
+            result = df[target_col].max()
+            return result, f"{target_col}的最大值", None
+    
+    if any(kw in query for kw in ['最小', '最低', '最少']):
+        target_col = None
+        for kw in ['金额', '工资', '价格', '销量', '年龄', '成绩']:
+            target_col = find_column([kw], prefer_numeric=True)
+            if target_col:
+                break
+        if not target_col and numeric_cols:
+            target_col = numeric_cols[0]
+        if target_col:
+            result = df[target_col].min()
+            return result, f"{target_col}的最小值", None
+    
+    # ===== 7. 处理分组统计 =====
+    group_col = None
+    for col in text_cols:
+        col_lower = col.lower()
+        if any(kw in col_lower for kw in query.split()):
+            if len(col) < 20:
+                group_col = col
+                break
+    
+    if group_col:
+        if any(kw in query for kw in ['数量', '多少']):
+            result = df.groupby(group_col).size().reset_index(name='数量')
+            return result, f"按{group_col}分组计数", None
+        else:
+            result = df.groupby(group_col).size().reset_index(name='数量')
+            return result, f"按{group_col}分组计数", None
+    
+    # ===== 8. 处理缺失值统计 =====
+    if '缺失' in query or '空值' in query:
+        missing = df.isnull().sum()
+        missing = missing[missing > 0]
+        if not missing.empty:
+            result = missing.reset_index()
+            result.columns = ['列名', '缺失数量']
+            return result, "缺失值统计", None
+        return 0, "无缺失值", None
+    
+    # ===== 9. 处理数据概览 =====
+    if '概览' in query or '基本信息' in query:
+        stats = {
+            '总行数': len(df),
+            '总列数': len(df.columns),
+            '数值列数': len(numeric_cols),
+            '文本列数': len(text_cols),
+            '缺失值总数': df.isnull().sum().sum(),
+        }
+        result = pd.DataFrame(list(stats.items()), columns=['指标', '值'])
+        return result, "数据概览", None
+    
+    # ===== 10. 默认返回前10条 =====
+    return df.head(10), "默认显示前10条", None
+
+# ============ 自然语言查询（API版本） ============
+
+def natural_language_query(df: pd.DataFrame, user_query: str, api_key: str = None) -> tuple:
+    """
+    使用自然语言查询数据
+    返回: (结果, 生成的代码, 错误信息)
+    """
+    if df is None or df.empty:
+        return None, None, "数据为空，请先上传数据"
+    
+    # 获取列名信息
+    columns_info = []
+    for col in df.columns:
+        col_type = str(df[col].dtype)
+        sample_values = df[col].dropna().head(3).tolist()
+        columns_info.append(f"- {col}: {col_type}, 示例值: {sample_values}")
+    
+    columns_str = "\n".join(columns_info)
+    columns_list = [col for col in df.columns]
+    
+    prompt = f"""你是一个数据分析助手。请将用户的自然语言问题转换为 pandas 代码。
+
+数据集信息:
+- 列名: {columns_list}
+- 列详情:
+{columns_str}
+- 数据行数: {len(df)}
+
+要求:
+1. 只生成 pandas 代码，使用变量名 'df'
+2. 不要生成任何说明文字，只返回可执行的 Python 代码
+3. 代码必须安全，只能操作 df
+4. 支持中文问题
+5. 如果问题是统计类（如平均、总和），返回聚合值即可
+6. 如果是筛选，返回筛选后的 DataFrame
+
+用户问题: {user_query}
+
+请只返回代码，不要返回其他内容。"""
+
+    try:
+        import openai
+        openai.api_key = api_key
+        
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "你是一个数据分析助手，只返回可执行的 pandas Python 代码。"},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0,
+            max_tokens=500
+        )
+        
+        generated_code = response.choices[0].message.content.strip()
+        # 清理代码
+        generated_code = generated_code.replace('```python', '').replace('```', '').strip()
+        
+    except Exception as e:
+        return None, None, f"API调用失败: {str(e)}"
+    
+    # 执行代码
+    try:
+        # 安全执行：限制命名空间
+        safe_names = {
+            'df': df,
+            'pd': pd,
+            'np': np,
+            'result': None
+        }
+        
+        # 清理危险代码
+        dangerous_patterns = ['import', 'os', 'sys', 'eval', 'exec', 'open', '__']
+        for pattern in dangerous_patterns:
+            if pattern in generated_code:
+                return None, generated_code, "代码包含不安全的内容"
+        
+        # 执行代码
+        exec(generated_code, safe_names)
+        result = safe_names.get('result')
+        
+        # 如果没有result变量，尝试找到返回值
+        if result is None:
+            # 尝试从代码中提取结果
+            match = re.search(r'result\s*=\s*(.+)', generated_code)
+            if match:
+                result_expr = match.group(1).strip()
+                result = eval(result_expr, {'df': df, 'pd': pd, 'np': np})
+        
+        return result, generated_code, None
+        
+    except Exception as e:
+        return None, generated_code, f"代码执行失败: {str(e)}"
+
+
+def format_result(result):
+    """格式化查询结果"""
+    if result is None:
+        return {"type": "empty", "value": None}
+    
+    # 检查是否是 pandas Series（需要在 DataFrame 检查之前）
+    if isinstance(result, pd.Series):
+        return {"type": "series", "data": result.to_dict()}
+    
+    if isinstance(result, pd.DataFrame):
+        if len(result) == 0:
+            return {"type": "empty", "value": "数据为空"}
+        if len(result) == 1 and len(result.columns) == 1:
+            return {"type": "metric", "value": float(result.iloc[0, 0])}
+        return {"type": "dataframe", "data": result}
+    
+    if isinstance(result, (int, float, np.integer, np.floating)):
+        return {"type": "metric", "value": float(result)}
+    
+    # 支持 numpy array（如 unique() 返回）
+    if hasattr(result, '__iter__') and hasattr(result, 'tolist'):
+        try:
+            return {"type": "array", "data": result.tolist()}
+        except:
+            pass
+    
+    return {"type": "unknown", "data": str(result)}
+
+
 # ============ 主应用 ============
 
 def main():
@@ -131,6 +473,8 @@ def main():
         st.session_state.df_cleaned = None
     if 'auto_clean_done' not in st.session_state:
         st.session_state.auto_clean_done = False
+    if 'query_history' not in st.session_state:
+        st.session_state.query_history = []
     
     # ============ 侧边栏 ============
     with st.sidebar:
@@ -149,6 +493,7 @@ def main():
                 st.session_state.df = df
                 st.session_state.df_cleaned = df.copy()
                 st.session_state.auto_clean_done = False
+                st.session_state.query_history = []
                 st.success(f"✅ 文件已加载: {df.shape[0]} 行 × {df.shape[1]} 列")
         
         st.divider()
@@ -189,6 +534,14 @@ def main():
                 st.rerun()
             else:
                 st.warning("请先上传数据文件")
+        
+        st.divider()
+        
+        # API Key 配置
+        st.subheader("🔑 OpenAI API Key")
+        api_key = st.text_input("输入 API Key", type="password", help="用于自然语言查询功能")
+        if api_key:
+            st.session_state.api_key = api_key
     
     # ============ 主内容区 ============
     if st.session_state.df is None:
@@ -212,7 +565,8 @@ def main():
             ("📈 数据分析", "统计摘要、相关性矩阵、频次分析"),
             ("📊 数据可视化", "5种交互式图表，支持动态选择"),
             ("🔄 全流程处理", "一键完成清洗→分析→可视化"),
-            ("📥 数据导出", "下载清洗后数据和图表")
+            ("📥 数据导出", "下载清洗后数据和图表"),
+            ("💬 自然语言", "用中文提问，自动查询数据")
         ]
         for i, (title, desc) in enumerate(features):
             with cols[i % 3]:
@@ -240,11 +594,12 @@ def main():
     st.markdown("---")
     
     # Tab 页面
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📋 数据预览", 
         "🧹 清洗转换", 
         "📊 可视化",
-        "📈 分析报告"
+        "📈 分析报告",
+        "💬 自然语言查询"
     ])
     
     # ============ Tab 1: 数据预览 ============
@@ -387,10 +742,7 @@ def main():
         if st.button("🎨 生成图表", type="primary"):
             try:
                 if chart_type == "散点图":
-                    if y_col and y_col in numeric_cols:
-                        fig = px.scatter(df_clean, x=x_col, y=y_col, title=f"{x_col} vs {y_col}")
-                    else:
-                        fig = px.scatter(df_clean, x=x_col, y=y_col, title=f"{x_col} vs {y_col}")
+                    fig = px.scatter(df_clean, x=x_col, y=y_col, title=f"{x_col} vs {y_col}")
                 
                 elif chart_type == "柱状图":
                     if y_col in numeric_cols:
@@ -426,14 +778,21 @@ def main():
                     st.plotly_chart(fig, use_container_width=True)
                     
                     # 下载按钮
-                    img_data = fig.to_image(format="png", width=1200, height=600)
-                    st.download_button(
-                        "📥 下载图表 PNG",
-                        img_data,
-                        f"chart_{chart_type}.png",
-                        "image/png",
-                        use_container_width=True
-                    )
+                    try:
+                        img_data = fig.to_image(format="png", width=1200, height=600)
+                        st.download_button(
+                            "📥 下载图表 PNG",
+                            img_data,
+                            f"chart_{chart_type}.png",
+                            "image/png",
+                            use_container_width=True
+                        )
+                    except Exception as e:
+                        # 检查是否是 kaleido 相关错误
+                        if 'kaleido' in str(e).lower():
+                            st.warning("图表下载功能暂时不可用")
+                        else:
+                            st.info(f"图表下载暂时不可用: {str(e)}")
             except Exception as e:
                 st.error(f"图表生成失败: {e}")
         
@@ -548,6 +907,123 @@ def main():
                 pass
         
         st.markdown(report)
+    
+    # ============ Tab 5: 自然语言查询 ============
+    with tab5:
+        st.subheader("💬 自然语言查询（本地解析，无需API）")
+        
+        # 说明
+        with st.expander("ℹ️ 使用说明", expanded=True):
+            st.markdown("""
+            **支持的查询类型（本地解析，无需API）：**
+            - 条件筛选：`金额大于1000`、`年龄小于30`
+            - 聚合统计：`平均金额`、`总和`、`最大值`
+            - 排序/TOP：`前10条`、`后5条`
+            - 分组聚合：`每个部门的数量`
+            - 数据概览：`概览`、`缺失值统计`
+            
+            **示例问题：**
+            - "显示前10条"
+            - "金额大于1000"
+            - "平均年龄"
+            - "每个部门的数量"
+            - "统计缺失值"
+            """)
+        
+        # 查询输入（无需API Key）
+        st.markdown("### 请输入您的问题")
+        user_query = st.text_input(
+            "例如：显示消费金额大于1000的记录",
+            placeholder="输入您的自然语言问题...",
+            label_visibility="collapsed"
+        )
+        
+        col_btn, col_example = st.columns([1, 3])
+        with col_btn:
+            query_button = st.button("🔍 查询", type="primary", use_container_width=True)
+        with col_example:
+            example_queries = [
+                "显示前10条",
+                "金额大于1000",
+                "平均年龄",
+                "每个部门的数量",
+                "统计缺失值"
+            ]
+            selected_example = st.selectbox("示例问题", [""] + example_queries, key="nl_example")
+            if selected_example:
+                user_query = selected_example
+        
+        # 执行查询（使用本地解析器）
+        if query_button and user_query:
+            with st.spinner("正在解析您的查询..."):
+                result, explanation, error = local_query_parser(df_clean, user_query)
+                
+                if error:
+                    st.error(error)
+                else:
+                    # 记录历史
+                    result_type = "error"
+                    if result is not None:
+                        try:
+                            result_type = format_result(result)['type']
+                        except:
+                            result_type = "dataframe"
+                    st.session_state.query_history.append({
+                        "query": user_query,
+                        "explanation": explanation,
+                        "result_type": result_type
+                    })
+                    
+                    # 显示操作说明
+                    st.info(f"📌 {explanation}")
+                    
+                    # 显示结果
+                    formatted = format_result(result)
+                    
+                    if formatted['type'] == 'metric':
+                        st.metric("查询结果", f"{formatted['value']:.2f}")
+                    
+                    elif formatted['type'] == 'dataframe':
+                        st.markdown(f"**查询结果（共 {len(formatted['data'])} 条）:**")
+                        st.dataframe(formatted['data'], use_container_width=True)
+                        
+                        # 如果结果适合可视化
+                        if len(formatted['data']) > 0:
+                            st.markdown("**可视化结果:**")
+                            cols_for_chart = formatted['data'].select_dtypes(include=[np.number]).columns.tolist()
+                            if cols_for_chart:
+                                chart_col = st.selectbox("选择要可视化的列", cols_for_chart, key="nl_chart_col")
+                                if chart_col:
+                                    fig = px.bar(formatted['data'], x=formatted['data'].index, y=chart_col, title=f"{chart_col} 可视化")
+                                    fig.update_layout(height=400, xaxis_title="", showlegend=False)
+                                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    elif formatted['type'] == 'series':
+                        st.markdown("**查询结果:**")
+                        result_df = pd.DataFrame({'类别': formatted['data'].keys(), '值': formatted['data'].values})
+                        st.dataframe(result_df, use_container_width=True)
+                        fig = px.bar(result_df, x='类别', y='值', title="结果可视化")
+                        fig.update_layout(height=400)
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    elif formatted['type'] == 'array':
+                        st.markdown("**唯一值列表:**")
+                        st.write(formatted['data'])
+        
+        # 显示查询历史
+        if st.session_state.query_history:
+            st.markdown("---")
+            st.markdown("### 📜 查询历史")
+            for i, item in enumerate(reversed(st.session_state.query_history[-5:])):
+                with st.expander(f"查询 {i+1}: {item['query'][:50]}...", expanded=False):
+                    st.markdown(f"**问题:** {item['query']}")
+                    if item.get('explanation'):
+                        st.markdown(f"**操作:** {item['explanation']}")
+        
+        # 清空历史
+        if st.button("🗑️ 清空查询历史"):
+            st.session_state.query_history = []
+            st.rerun()
     
     # 页脚
     st.markdown("---")
